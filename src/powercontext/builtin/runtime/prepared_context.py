@@ -41,6 +41,13 @@ from powercontext.builtin.runtime.prepared_text import (
     render_context_text,
 )
 from powercontext.builtin.runtime.recall_sufficiency import RecallBudgetView
+from powercontext.builtin.runtime.evidence_selection import (
+    PreparedContextFragment,
+    _evidence_terms,
+    evidence_windows,
+    fit_evidence_fragment,
+    render_evidence_context,
+)
 
 _MIN_TRUNCATED_CONTENT_BYTES = 64
 _ELLIPSIS = "…"
@@ -106,6 +113,7 @@ class PreparedContextBuild:
     origins: tuple[PreparedContextOrigin, ...]
     omissions: PreparedContextOmissions = PreparedContextOmissions()
     code_origins: tuple[CodeEvidenceRef, ...] = ()
+    fragments: tuple[PreparedContextFragment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -211,6 +219,11 @@ class PreparedContextBuilder:
         profile_candidates: Sequence[PreparedProfileCandidate] = (),
         code_candidates: Sequence[PreparedCodeCandidate] = (),
     ) -> PreparedContextBuild:
+        if request.evidence_selection:
+            return self._build_evidence_result(
+                request=request,
+                memory_candidates=memory_candidates,
+            )
         if request.include_code:
 
             def historical(history_request: PrepareContextRequest, entries: int) -> PreparedContextBuild:
@@ -254,6 +267,63 @@ class PreparedContextBuilder:
             context=PreparedContext(status="ready", content=content, content_bytes=content_bytes),
             origins=origins,
             omissions=omissions,
+        )
+
+    def _build_evidence_result(
+        self,
+        *,
+        request: PrepareContextRequest,
+        memory_candidates: Sequence[PreparedMemoryCandidates],
+    ) -> PreparedContextBuild:
+        terms = _evidence_terms(request.query)
+        windows: list[PreparedContextFragment] = []
+        seen: set[tuple[str, str, int, int]] = set()
+        for group in memory_candidates:
+            if group.memory_ref is None:
+                continue
+            artifact_address = ArtifactAddress(scope_id=group.scope_id, artifact=group.memory_ref)
+            for hit in group.hits:
+                address = MemoryEntryAddress(
+                    memory=artifact_address,
+                    entry_id=hit.entry_id,
+                    entry_version_id=hit.entry_version_id,
+                )
+                for start, end in evidence_windows(hit.text, terms):
+                    key = (hit.entry_id, hit.entry_version_id, start, end)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    windows.append(
+                        PreparedContextFragment(
+                            address=address, start=start, end=end, text=hit.text[start:end]
+                        )
+                    )
+        if not windows:
+            for group in memory_candidates:
+                if group.memory_ref is None or not group.hits:
+                    continue
+                artifact_address = ArtifactAddress(scope_id=group.scope_id, artifact=group.memory_ref)
+                hit = group.hits[0]
+                address = MemoryEntryAddress(
+                    memory=artifact_address,
+                    entry_id=hit.entry_id,
+                    entry_version_id=hit.entry_version_id,
+                )
+                end = min(len(hit.text), 400)
+                windows.append(PreparedContextFragment(address=address, start=0, end=end, text=hit.text[:end]))
+                break
+        selected: list[PreparedContextFragment] = []
+        for fragment in windows[:16]:
+            fitted = fit_evidence_fragment(selected, fragment, request.max_bytes)
+            if fitted is not None:
+                selected.append(fitted)
+        if not selected:
+            return PreparedContextBuild(context=self.empty(), origins=(), fragments=())
+        content = render_evidence_context(tuple(selected))
+        return PreparedContextBuild(
+            context=PreparedContext(status="ready", content=content, content_bytes=len(content.encode("utf-8"))),
+            origins=tuple(fragment.address for fragment in selected),
+            fragments=tuple(selected),
         )
 
     def probe_budget(
