@@ -1189,3 +1189,20 @@ BUILTIN_TABLES = (
     + RECURRENCE_TABLES
     + (ARTIFACT_TAGS_TABLE, DREAM_RUNS_TABLE, RECEIPT_MIGRATION_REVIEW_TABLE)
 )
+
+
+SOURCE_LIFECYCLE_TABLE = Table(
+    "pc_source_lifecycle",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(256), primary_key=True),
+    Column("artifact_id", identity_string(MAX_ARTIFACT_ID_LENGTH), nullable=True),
+    Column("kind", identity_string(16), nullable=False),
+    Column("parents", _canonical_payload_type(), nullable=False),
+    Column("policy", identity_string(16), nullable=False),
+    Column("available", Boolean, nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("sequence", Integer, nullable=False),
+    Column("last_event", _canonical_payload_type(), nullable=True),
+    Column("reference", _canonical_payload_type(), nullable=False),
+)

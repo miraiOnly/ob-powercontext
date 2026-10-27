@@ -167,6 +167,11 @@ from powercontext.builtin.runtime._scope_cache import (
     ScopeEvictor,
 )
 from powercontext.builtin.runtime.decision_model import DecisionModel
+from powercontext.builtin.runtime.source_lifecycle import (
+    LifecycleGraph,
+    SourceLifecycleError,
+    SourceLifecycleEvent,
+)
 from powercontext.builtin.runtime.errors import InvalidRuntimeRequestError, TopicMemoryProcessingUnavailableError
 from powercontext.builtin.runtime.models import (
     ApproveArtifactCandidateRequest,
@@ -2867,6 +2872,146 @@ class TopicMemoryApplication:
         return ScopedTopicMemoryApplication(self._runtime, scope_id)
 
 
+class LifecycleApplication:
+    """Select the scoped source-lifecycle application service."""
+
+    def __init__(self, runtime: BuiltinRuntime) -> None:
+        self._runtime = runtime
+
+    def for_scope(self, scope_id: str, /) -> ScopedLifecycleApplication:
+        return ScopedLifecycleApplication(self._runtime, scope_id)
+
+
+class ScopedLifecycleApplication:
+    """Register evidence dependencies and propagate Source lifecycle events."""
+
+    def __init__(self, runtime: BuiltinRuntime, scope_id: str) -> None:
+        self._runtime = runtime
+        self.scope_id = validate_scope_id(scope_id)
+
+    async def _graph(self) -> LifecycleGraph:
+        cached = self._runtime._lifecycle_graphs.get(self.scope_id)
+        if cached is not None:
+            return cached
+        if self._runtime._lifecycle_database is None:
+            raise SourceLifecycleError("lifecycle storage is unavailable")
+        from powercontext.builtin.persistence.source_lifecycle import SourceLifecycleRepository
+
+        state = await SourceLifecycleRepository(self._runtime._lifecycle_database, self.scope_id).load()
+        graph = LifecycleGraph.from_state(state)
+        self._runtime._lifecycle_graphs[self.scope_id] = graph
+        return graph
+
+    async def _save(self, graph: LifecycleGraph) -> None:
+        if self._runtime._lifecycle_database is None:
+            raise SourceLifecycleError("lifecycle storage is unavailable")
+        from powercontext.builtin.persistence.source_lifecycle import SourceLifecycleRepository
+
+        await SourceLifecycleRepository(self._runtime._lifecycle_database, self.scope_id).save(graph.to_state())
+
+    async def register_source(self, node_id: str, source_ref: SourceRef, *, revision: int) -> None:
+        try:
+            await self._runtime.records.for_scope(self.scope_id).get_source(
+                source_ref.source_type, source_ref.source_id
+            )
+        except Exception as error:
+            raise SourceLifecycleError("source reference is not readable") from error
+        graph = await self._graph()
+        graph.register(node_id, "source", source_ref, (), "all", source_revision=revision)
+        await self._save(graph)
+
+    async def register_memory(
+        self,
+        node_id: str,
+        citation: MemoryCitation,
+        *,
+        parents: tuple[str, ...],
+        policy: str,
+    ) -> None:
+        try:
+            await self._runtime.memory.for_scope(self.scope_id).get(
+                GetMemoryEntryRequest(citation=citation)
+            )
+        except Exception as error:
+            raise SourceLifecycleError("memory citation is not readable") from error
+        graph = await self._graph()
+        graph.register(node_id, "memory", citation, tuple(parents), policy)
+        await self._save(graph)
+        await self._reconcile_node(graph, node_id)
+
+    async def register_topic(
+        self,
+        node_id: str,
+        reference: ArtifactRef,
+        *,
+        parents: tuple[str, ...],
+        policy: str,
+    ) -> None:
+        try:
+            await self._runtime.records.for_scope(self.scope_id).get_artifact_revision(
+                "topic-memory", reference.artifact_id, reference.revision
+            )
+        except Exception as error:
+            raise SourceLifecycleError("topic artifact is not readable") from error
+        graph = await self._graph()
+        graph.register(node_id, "topic", reference, tuple(parents), policy)
+        await self._save(graph)
+        await self._reconcile_node(graph, node_id)
+
+    async def apply(self, event: SourceLifecycleEvent) -> list[str]:
+        graph = await self._graph()
+        graph.apply_event(event)
+        await self._reconcile_effects(graph)
+        await self._save(graph)
+        return graph.active_ids()
+
+    async def _reconcile_effects(self, graph: LifecycleGraph) -> None:
+        for node in graph.nodes.values():
+            await self._reconcile_node(graph, node.node_id)
+
+    async def _reconcile_node(self, graph: LifecycleGraph, node_id: str) -> None:
+        node = graph.nodes[node_id]
+        if node.applied == node.available:
+            return
+        if node.kind == "memory":
+            async with self._runtime._context(self.scope_id) as context:
+                async with self._runtime._locked(self.scope_id):
+                    service = context.artifacts.memory
+                    current = await service.head(context.artifacts.memory_artifact_id)
+                    fresh = MemoryCitation(
+                        memory_ref=current.as_ref(),
+                        entry_id=node.reference.entry_id,
+                        entry_version_id=node.reference.entry_version_id,
+                    )
+                    entry = await service.validate_citation(fresh)
+                    if node.available:
+                        await service.reactivate(current, entries=(entry,), reason="source lifecycle propagation")
+                    else:
+                        await service.forget(current, entries=(entry,), reason="source lifecycle propagation")
+            node.applied = node.available
+        elif node.kind == "topic":
+            if node.available:
+                if self._runtime._topic_memory_reactivate is not None:
+                    await self._runtime._topic_memory_reactivate(self.scope_id, node.reference)
+            else:
+                if self._runtime._topic_memory_deactivate is not None:
+                    await self._runtime._topic_memory_deactivate(self.scope_id, node.reference.artifact_id)
+            node.applied = node.available
+
+    async def resolve(self, node_id: str, *, purpose: str):
+        graph = await self._graph()
+        node = graph.nodes.get(node_id)
+        if node is None:
+            raise SourceLifecycleError("unknown node")
+        if purpose == "audit":
+            return node.reference
+        if purpose == "generation":
+            if not node.available:
+                raise SourceLifecycleError("node is unavailable for generation")
+            return node.reference
+        raise SourceLifecycleError("unknown purpose")
+
+
 class ScheduledSourceProcessor:
     """Map APScheduler activations to scoped Source-window policies."""
 
@@ -3055,6 +3200,9 @@ class BuiltinRuntime:
         skill_usage_recorder: SkillUsageRecorder | None = None,
         experience_incubator: ExperienceIncubator | None = None,
         topic_memory_search: TopicMemorySearch | None = None,
+        topic_memory_deactivate: Callable[[str, str], Awaitable[None]] | None = None,
+        topic_memory_reactivate: Callable[[str, ArtifactRef], Awaitable[None]] | None = None,
+        lifecycle_database: object | None = None,
         topic_memory_get: TopicMemoryGet | None = None,
         topic_memory_browse: TopicMemoryBrowse | None = None,
         topic_memory_flush: TopicMemoryFlush | None = None,
@@ -3111,6 +3259,10 @@ class BuiltinRuntime:
         self._skill_usage_recorder = skill_usage_recorder
         self._experience_incubator = experience_incubator
         self._topic_memory_search = topic_memory_search
+        self._topic_memory_deactivate = topic_memory_deactivate
+        self._topic_memory_reactivate = topic_memory_reactivate
+        self._lifecycle_database = lifecycle_database
+        self._lifecycle_graphs: dict[str, LifecycleGraph] = {}
         self._topic_memory_get = topic_memory_get
         self._topic_memory_browse = topic_memory_browse
         self._topic_memory_flush = topic_memory_flush
@@ -3165,6 +3317,7 @@ class BuiltinRuntime:
         self.memory = MemoryApplication(self)
         self.topic_memory = TopicMemoryApplication(self)
         self.records = RecordApplication(self)
+        self.lifecycle = LifecycleApplication(self)
         self.prompts = PromptApplication(self)
         self.review = ReviewApplication(self)
         self.skill = SkillApplication(self)

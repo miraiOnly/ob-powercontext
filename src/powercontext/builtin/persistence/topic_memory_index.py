@@ -113,6 +113,16 @@ class NoTopicMemoryIndex:
         return False
 
 
+    async def delete(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        artifact_id: str,
+        /,
+    ) -> None:
+        return None
+
+
 class CompositeTopicMemoryIndex:
     """Compose one FTS adapter and an optional matching vector adapter."""
 
@@ -149,6 +159,16 @@ class CompositeTopicMemoryIndex:
     ) -> None:
         for index in self.indexes:
             await index.replace(connection, scope_id, topic_ref, projection)
+
+    async def delete(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        artifact_id: str,
+        /,
+    ) -> None:
+        for index in self.indexes:
+            await index.delete(connection, scope_id, artifact_id)
 
     async def search(
         self,

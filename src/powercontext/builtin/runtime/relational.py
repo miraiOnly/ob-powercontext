@@ -971,6 +971,20 @@ class RelationalContexts:
                 after=after,
             )
 
+    async def deactivate_topic_memory(self, scope_id: str, artifact_id: str) -> None:
+        """Remove one Topic from the active index without touching its artifact."""
+
+        scope = validate_scope_id(scope_id)
+        async with self.database.transaction() as connection:
+            await self.repositories.topic_memories.deactivate(connection, scope, artifact_id)
+
+    async def reactivate_topic_memory(self, scope_id: str, reference: ArtifactRef) -> None:
+        """Rebuild the complete active index state for one Topic revision."""
+
+        scope = validate_scope_id(scope_id)
+        async with self.database.transaction() as connection:
+            await self.repositories.topic_memories.reactivate(connection, scope, reference)
+
     async def search_topic_memories(
         self,
         scope_id: str,

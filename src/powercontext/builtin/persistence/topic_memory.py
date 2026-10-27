@@ -48,6 +48,7 @@ from powercontext.builtin.artifacts.topic_memory import (
     chunk_topic_memory_detail,
 )
 from powercontext.builtin.artifacts.topic_memory.fusion import _fuse_topic_memory_rankings
+from powercontext.builtin.artifacts.topic_memory.chunking import prepare_topic_memory_projection
 from powercontext.builtin.persistence.artifacts import ArtifactRepository
 from powercontext.builtin.persistence.errors import InvalidRepositoryArgumentError
 from powercontext.builtin.persistence.supervision import database_utc_now
@@ -58,6 +59,7 @@ from powercontext.builtin.persistence.tables import (
     TOPIC_MEMORY_ACTIVE_TOPICS_TABLE,
     TOPIC_MEMORY_RETRIEVAL_SHAPE_TABLE,
     TOPIC_MEMORY_REVISION_PUBLICATIONS_TABLE,
+    SOURCE_LIFECYCLE_TABLE,
 )
 from powercontext.builtin.persistence.tags import tag_predicate
 from powercontext.builtin.persistence.topic_memory_index import (
@@ -192,6 +194,13 @@ class TopicMemoryRepository:
                     )
                     .where(
                         ARTIFACT_HEADS_TABLE.c.family == TopicMemory.family,
+                        ARTIFACT_HEADS_TABLE.c.artifact_id.not_in(
+                            select(SOURCE_LIFECYCLE_TABLE.c.artifact_id).where(
+                                SOURCE_LIFECYCLE_TABLE.c.scope_id == ARTIFACT_HEADS_TABLE.c.scope_id,
+                                SOURCE_LIFECYCLE_TABLE.c.kind == "topic",
+                                SOURCE_LIFECYCLE_TABLE.c.available.is_(False),
+                            )
+                        ),
                         or_(
                             TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.revision.is_(None),
                             TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.revision != ARTIFACT_HEADS_TABLE.c.revision,
@@ -334,6 +343,48 @@ class TopicMemoryRepository:
             is_current=current == ref,
             current_artifact=current,
         )
+
+    async def deactivate(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        artifact_id: str,
+    ) -> None:
+        """Remove one Topic from the active index without touching its artifact."""
+
+        for table in (TOPIC_MEMORY_ACTIVE_CHUNKS_TABLE, TOPIC_MEMORY_ACTIVE_TOPICS_TABLE):
+            await connection.execute(
+                delete(table).where(
+                    table.c.scope_id == scope_id,
+                    table.c.artifact_id == artifact_id,
+                )
+            )
+        await self.index.delete(connection, scope_id, artifact_id)
+
+    async def reactivate(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        ref: ArtifactRef,
+    ) -> None:
+        """Rebuild the complete active index state for one existing Topic revision."""
+
+        if ref.family != TopicMemory.family:
+            raise InvalidRepositoryArgumentError("artifact_ref", "must reference topic-memory")
+        topic = await self.artifacts.get(connection, scope_id, ref)
+        if not isinstance(topic, TopicMemory):
+            raise TopicMemoryStorageInvariantError("artifact-type", ref)
+        projection = prepare_topic_memory_projection(topic.content)
+        await self.deactivate(connection, scope_id, ref.artifact_id)
+        await connection.execute(
+            delete(TOPIC_MEMORY_REVISION_PUBLICATIONS_TABLE).where(
+                TOPIC_MEMORY_REVISION_PUBLICATIONS_TABLE.c.scope_id == scope_id,
+                TOPIC_MEMORY_REVISION_PUBLICATIONS_TABLE.c.family == TopicMemory.family,
+                TOPIC_MEMORY_REVISION_PUBLICATIONS_TABLE.c.artifact_id == ref.artifact_id,
+                TOPIC_MEMORY_REVISION_PUBLICATIONS_TABLE.c.revision == ref.revision,
+            )
+        )
+        await self._activate(connection, scope_id, topic, projection)
 
     async def browse_current(
         self,

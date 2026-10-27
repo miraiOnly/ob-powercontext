@@ -106,7 +106,7 @@ from powercontext.builtin.persistence.sqlite.topic_memory_index import (
     SQLiteTopicMemoryFTSIndex,
     SQLiteTopicMemoryVectorIndex,
 )
-from powercontext.builtin.persistence.tables import BUILTIN_TABLES
+from powercontext.builtin.persistence.tables import BUILTIN_TABLES, SOURCE_LIFECYCLE_TABLE
 from powercontext.builtin.persistence.tag_schema import ensure_topic_memory_tag_schema
 from powercontext.builtin.persistence.topic_memory import TopicMemoryRepository
 from powercontext.builtin.persistence.topic_memory_index import (
@@ -628,6 +628,9 @@ async def open_builtin_runtime(
                 skill_usage_recorder=contexts.record_skill_usage,
                 experience_incubator=contexts.incubate_experience if contexts.experience_incubation else None,
                 topic_memory_search=contexts.search_topic_memories,
+                topic_memory_deactivate=contexts.deactivate_topic_memory,
+                topic_memory_reactivate=contexts.reactivate_topic_memory,
+                lifecycle_database=contexts.database,
                 topic_memory_get=contexts.get_topic_memory,
                 topic_memory_browse=contexts.browse_topic_memories,
                 topic_memory_flush=contexts.request_topic_memory_flush,
@@ -894,7 +897,7 @@ async def open_builtin_contexts(
         topic_index = CompositeTopicMemoryIndex(*topic_indexes)
         async with SQLiteProfile.open(
             database,
-            tables=BUILTIN_TABLES + index.tables + topic_index.tables,
+            tables=BUILTIN_TABLES + index.tables + topic_index.tables + (SOURCE_LIFECYCLE_TABLE,),
             load_vector_extension=embedding_model is not None,
         ) as profile:
             async with profile.database.transaction() as connection:
@@ -970,7 +973,7 @@ async def open_builtin_contexts(
     if embedding_model is not None:
         topic_indexes.append(OceanBaseTopicMemoryVectorIndex(embedding_model.profile))
     topic_index = CompositeTopicMemoryIndex(*topic_indexes)
-    tables = BUILTIN_TABLES + index.tables + topic_index.tables
+    tables = BUILTIN_TABLES + index.tables + topic_index.tables + (SOURCE_LIFECYCLE_TABLE,)
     if isinstance(database, OceanBaseConfig):
         profile_context = OceanBaseProfile.open(database, tables=tables)
     elif isinstance(database, SeekDBConfig):

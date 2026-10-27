@@ -384,6 +384,17 @@ class SQLiteTopicMemoryFTSIndex:
                 },
             )
 
+    async def delete(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        artifact_id: str,
+        /,
+    ) -> None:
+        identity = {"scope_id": scope_id, "artifact_id": artifact_id}
+        await connection.execute(_DELETE_TOPIC_FTS_SQL, identity)
+        await connection.execute(_DELETE_CHUNK_FTS_SQL, identity)
+
     async def search(
         self,
         connection: AsyncConnection,
@@ -597,6 +608,15 @@ class SQLiteTopicMemoryVectorIndex:
                     ),
                 },
             )
+
+    async def delete(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        artifact_id: str,
+        /,
+    ) -> None:
+        await self._delete_existing(connection, scope_id, artifact_id)
 
     async def search(
         self,
