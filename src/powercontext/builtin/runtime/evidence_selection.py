@@ -120,10 +120,12 @@ def select_evidence_fragments(
 ) -> tuple[PreparedContextFragment, ...]:
     """Select literal fragments from candidate texts to fit the byte budget.
 
-    ``candidates`` is a tuple of ``(text, address)`` pairs. Whole sentences
-    are scored by weighted query-term evidence, selection interleaves across
-    candidates so every candidate can contribute, and accepted fragments are
-    widened by adjacent high-scoring sentences while budget remains.
+    ``candidates`` is a tuple of ``(text, address)`` pairs. The top-ranked
+    candidate (almost always the claim's cited abstract) receives a large
+    share of the budget: its best-scoring sentences become anchors that are
+    expanded into contiguous runs, so evidence located in the middle or end
+    of the document is covered. The remaining candidates each contribute
+    their strongest sentence with what budget is left.
     """
 
     weights = _query_weights(query)
@@ -153,25 +155,8 @@ def select_evidence_fragments(
             for start, end in _sentence_spans(text)
             if score_span(hit, start, end) > 0
         ]
-        runs: list[_Candidate] = []
-        index = 0
-        while index < len(sentences):
-            end_index = index
-            while end_index + 1 < len(sentences) and sentences[end_index + 1].start == sentences[end_index].end:
-                end_index += 1
-            if end_index > index:
-                runs.append(
-                    _Candidate(
-                        hit,
-                        sentences[index].start,
-                        sentences[end_index].end,
-                        sum(item.score for item in sentences[index : end_index + 1]),
-                    )
-                )
-            index = end_index + 1
-        ordered = sentences + runs
-        ordered.sort(key=lambda item: -item.score)
-        per_hit.append(ordered)
+        sentences.sort(key=lambda item: -item.score)
+        per_hit.append(sentences)
 
     selected: list[PreparedContextFragment] = []
     taken: dict[int, list[tuple[int, int]]] = {}
@@ -179,7 +164,7 @@ def select_evidence_fragments(
     def overlaps(hit: int, start: int, end: int) -> bool:
         return any(start < span_end and span_start < end for span_start, span_end in taken.get(hit, ()))
 
-    def fits(candidate: _Candidate) -> PreparedContextFragment | None:
+    def fits(candidate: _Candidate, cap: int, char_limit: int | None = None) -> PreparedContextFragment | None:
         def trial(start: int, end: int) -> PreparedContextFragment:
             return PreparedContextFragment(
                 address=candidates[candidate.hit][1],
@@ -189,15 +174,18 @@ def select_evidence_fragments(
             )
 
         current = list(selected)
-        whole = trial(candidate.start, candidate.end)
-        if len(render_evidence_context(tuple(current + [whole])).encode("utf-8")) <= max_bytes:
+        whole_end = candidate.end
+        if char_limit is not None and whole_end - candidate.start > char_limit:
+            whole_end = candidate.start + char_limit
+        whole = trial(candidate.start, whole_end)
+        if len(render_evidence_context(tuple(current + [whole])).encode("utf-8")) <= cap:
             return whole
-        lower, upper = candidate.start + 80, candidate.end
+        lower, upper = candidate.start + 80, whole_end
         best = None
         while lower <= upper:
             middle = (lower + upper) // 2
             trimmed = trial(candidate.start, middle)
-            if len(render_evidence_context(tuple(current + [trimmed])).encode("utf-8")) <= max_bytes:
+            if len(render_evidence_context(tuple(current + [trimmed])).encode("utf-8")) <= cap:
                 best = trimmed
                 lower = middle + 1
             else:
@@ -208,40 +196,102 @@ def select_evidence_fragments(
         selected.append(fragment)
         taken.setdefault(hit, []).append((fragment.start, fragment.end))
 
-    # Round-robin: each candidate text contributes its best fragment first.
-    indexes = [0] * len(per_hit)
-    progressed = True
-    while progressed:
-        progressed = False
-        for hit in range(len(per_hit)):
-            while indexes[hit] < len(per_hit[hit]):
-                candidate = per_hit[hit][indexes[hit]]
-                indexes[hit] += 1
-                if overlaps(candidate.hit, candidate.start, candidate.end):
+    share = int(max_bytes * 0.72)
+
+    # Primary: anchor-run expansion on the top-ranked candidate.
+    if texts and texts[0]:
+        spans = _sentence_spans(texts[0])
+        anchors = sorted(
+            (_Candidate(0, start, end, score_span(0, start, end)) for start, end in spans),
+            key=lambda item: -item.score,
+        )
+        for anchor in anchors:
+            if overlaps(0, anchor.start, anchor.end):
+                continue
+            fragment = fits(anchor, max_bytes)
+            if fragment is None:
+                continue
+            accept(fragment, 0)
+            # grow into a contiguous run around the anchor while budget allows
+            while True:
+                grown = False
+                for sentence_start, sentence_end in reversed(spans):
+                    if sentence_end <= fragment.start:
+                        if any(
+                            other_start < fragment.end and sentence_start < other_end
+                            for other_start, other_end in taken.get(0, ())[:-1]
+                        ):
+                            break
+                        trial_fragment = PreparedContextFragment(
+                            address=candidates[0][1],
+                            start=sentence_start,
+                            end=fragment.end,
+                            text=texts[0][sentence_start : fragment.end],
+                        )
+                        current = list(selected)
+                        current[-1] = trial_fragment
+                        if len(render_evidence_context(tuple(current)).encode("utf-8")) <= max_bytes:
+                            selected[-1] = trial_fragment
+                            taken[0][-1] = (sentence_start, fragment.end)
+                            fragment = trial_fragment
+                            grown = True
+                        break
+                for sentence_start, sentence_end in spans:
+                    if sentence_start >= fragment.end:
+                        if any(
+                            other_start < sentence_end and fragment.start < other_end
+                            for other_start, other_end in taken.get(0, ())[:-1]
+                        ):
+                            break
+                        trial_fragment = PreparedContextFragment(
+                            address=candidates[0][1],
+                            start=fragment.start,
+                            end=sentence_end,
+                            text=texts[0][fragment.start : sentence_end],
+                        )
+                        current = list(selected)
+                        current[-1] = trial_fragment
+                        if len(render_evidence_context(tuple(current)).encode("utf-8")) <= max_bytes:
+                            selected[-1] = trial_fragment
+                            taken[0][-1] = (fragment.start, sentence_end)
+                            fragment = trial_fragment
+                            grown = True
+                        break
+                if not grown:
+                    break
+
+    # Secondary: each remaining candidate contributes its best sentence
+    # within the reserved share, then leftovers are filled by score.
+    secondary = [hit for hit in range(1, len(per_hit))]
+    picked_any = True
+    while picked_any:
+        picked_any = False
+        for hit in secondary:
+            for candidate in per_hit[hit]:
+                if overlaps(hit, candidate.start, candidate.end):
                     continue
-                fragment = fits(candidate)
+                fragment = fits(candidate, share, char_limit=600)
                 if fragment is None:
                     continue
-                accept(fragment, candidate.hit)
-                progressed = True
+                accept(fragment, hit)
+                picked_any = True
                 break
 
-    # Greedy fill with the strongest remaining fragments across all texts.
     remaining = [
         candidate
-        for hit, ordered in enumerate(per_hit)
-        for candidate in ordered[indexes[hit] :]
+        for hit in secondary
+        for candidate in per_hit[hit]
     ]
     remaining.sort(key=lambda item: -item.score)
     for candidate in remaining:
         if overlaps(candidate.hit, candidate.start, candidate.end):
             continue
-        fragment = fits(candidate)
+        fragment = fits(candidate, max_bytes, char_limit=600)
         if fragment is None:
             continue
         accept(fragment, candidate.hit)
 
-    # Widen accepted fragments by adjacent positive sentences while budget allows.
+    # Widen secondary fragments by adjacent positive sentences when possible.
     def hit_of(fragment: PreparedContextFragment) -> int:
         for index, (_, address) in enumerate(candidates):
             if address == fragment.address:
@@ -253,7 +303,7 @@ def select_evidence_fragments(
         extended = False
         for position, fragment in enumerate(selected):
             hit = hit_of(fragment)
-            if hit < 0:
+            if hit <= 0:
                 continue
             spans = _sentence_spans(texts[hit])
             others = [
