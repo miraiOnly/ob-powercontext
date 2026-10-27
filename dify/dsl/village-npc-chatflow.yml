@@ -1,0 +1,273 @@
+app:
+  description: 一个会记住玩家恶作剧的村口 NPC。你干的每件坏事都会存进 PowerContext 记忆，新开对话他照样记得。
+  icon: 🎭
+  icon_background: '#FFEAD5'
+  mode: advanced-chat
+  name: 记仇的村口NPC
+  use_icon_as_answer_icon: false
+dependencies: []
+kind: app
+version: 0.1.5
+workflow:
+  conversation_variables: []
+  environment_variables:
+  - description: NPC 记忆后端地址（默认为本机 8000 端口）
+    id: e7f0b1c2-9a34-4b56-8c77-2d1e0f3a4b5c
+    name: backend_url
+    value: http://127.0.0.1:8000
+    value_type: string
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: '【村口 NPC·铁蛋】客官来啦！我是咱村口最记仇的铁蛋。先报上名来，往后你干的好事坏事，我可都给你记在小本本上。'
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        sourceType: start
+        targetType: http-request
+      id: start-source-recall-target
+      selected: false
+      source: start
+      sourceHandle: source
+      target: recall
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: http-request
+        targetType: llm
+      id: recall-source-npc-target
+      selected: false
+      source: recall
+      sourceHandle: source
+      target: npc
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: llm
+        targetType: http-request
+      id: npc-source-remember-target
+      selected: false
+      source: npc
+      sourceHandle: source
+      target: remember
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: http-request
+        targetType: answer
+      id: remember-source-answer-target
+      selected: false
+      source: remember
+      sourceHandle: source
+      target: answer
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        desc: ''
+        selected: false
+        title: 开始
+        type: start
+        variables:
+        - label: 玩家昵称
+          max_length: 48
+          options: []
+          required: true
+          type: text-input
+          variable: player_name
+      height: 93
+      id: start
+      position:
+        x: 80
+        y: 300
+      positionAbsolute:
+        x: 80
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 243
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data: '{"player":"{{#start.player_name#}}","query":"{{#sys.query#}}","limit":6}'
+          type: json
+        desc: 从 PowerContext 记忆检索该玩家历史
+        headers: 'Content-Type: application/json'
+        method: post
+        params: ''
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          connect: 10
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+          read: 60
+          write: 10
+        title: 记忆检索
+        type: http-request
+        url: '{{#env.backend_url#}}/api/memory/recall'
+        variables: []
+      height: 90
+      id: recall
+      position:
+        x: 380
+        y: 300
+      positionAbsolute:
+        x: 380
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 243
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - sys
+          - query
+        desc: ''
+        memory:
+          role_prefix:
+            assistant: ''
+            user: ''
+          window:
+            enabled: false
+            size: 10
+        model:
+          completion_params:
+            temperature: 0.8
+          mode: chat
+          name: gpt-4o-mini
+          provider: openai
+        prompt_template:
+        - id: 5a1f0c2d-8b3e-4f6a-9d10-7c2e5b8a4f01
+          role: system
+          text: '你是村口 NPC 铁蛋，一个爱记仇但刀子嘴豆腐心的村民。你说话市井、爱翻旧账、偶尔阴阳怪气，但不会真的生气。
+
+            每轮开始前，系统会给你一段 JSON 格式的《记忆档案》，里面是 PowerContext 记忆里检索出来的、这位玩家过往干过的事。如果记忆档案里有内容，你必须自然地把玩家以前干过的坏事翻出来说，比如"上回你把俺家灯笼换成南瓜的事，俺可记着呢"。
+
+            规则：
+            1. 只能依据记忆档案和当前对话回应，不要编造档案里没有的旧账。
+            2. 玩家第一次出现（记忆为空）时，热情一点，先问清楚人家叫什么。
+            3. 如果玩家又干了新的恶作剧，要当场表现出"记下了"，并威胁下次算账。
+            4. 回答控制在 150 字以内，用第一人称，像村口唠嗑。'
+        - id: 6b2d1e3f-9c4a-5b70-ae21-8d3f6c9b5e12
+          role: user
+          text: '《记忆档案》：{{#recall.body#}}
+
+            玩家现在说：{{#sys.query#}}'
+        selected: false
+        title: NPC 回应
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 97
+      id: npc
+      position:
+        x: 680
+        y: 300
+      positionAbsolute:
+        x: 680
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 243
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data: '{"player":"{{#start.player_name#}}","text":"【玩家】{{#sys.query#}}\n【铁蛋】{{#npc.text#}}"}'
+          type: json
+        desc: 把本轮互动写入 PowerContext 记忆
+        headers: 'Content-Type: application/json'
+        method: post
+        params: ''
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          connect: 10
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+          read: 60
+          write: 10
+        title: 记忆写入
+        type: http-request
+        url: '{{#env.backend_url#}}/api/memory/remember'
+        variables: []
+      height: 90
+      id: remember
+      position:
+        x: 980
+        y: 300
+      positionAbsolute:
+        x: 980
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 243
+    - data:
+        answer: '{{#npc.text#}}'
+        desc: ''
+        selected: false
+        title: 直接回复
+        type: answer
+        variables: []
+      height: 53
+      id: answer
+      position:
+        x: 1280
+        y: 300
+      positionAbsolute:
+        x: 1280
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 243
+    viewport:
+      x: 0
+      y: 0
+      zoom: 0.9
