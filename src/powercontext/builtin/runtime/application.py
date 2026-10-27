@@ -469,7 +469,10 @@ class ScopedSourceApplication:
         self.scope_id = validate_scope_id(scope_id)
 
     async def capture(self, value: CaptureSource, /) -> SourceReceipt:
-        return await self._capture(value)
+        receipt = await self._capture(value)
+        if self._runtime.artifact_processing_supervisor is not None:
+            self._runtime.artifact_processing_supervisor.wake()
+        return receipt
 
     async def _capture(self, value: CaptureSource, /, *, handoff_receipt: bool = False) -> SourceReceipt:
         if self._runtime._record_service is not None:
@@ -2601,6 +2604,23 @@ class ScopedMemoryApplication:
                 previous_revision=current.revision,
                 memory_ref=updated.as_ref(),
                 entry=_entry_record(updated, retired),
+            )
+
+    async def reactivate(self, request: RetireMemoryEntryRequest, /) -> MemoryMutationResult:
+        async with self._runtime._context(self.scope_id) as context:
+            async with self._runtime._locked(self.scope_id):
+                service = context.artifacts.memory
+                current, entry = await _current_citation(
+                    service,
+                    context.artifacts.memory_artifact_id,
+                    request.citation,
+                )
+                updated = await service.reactivate(current, entries=(entry,), reason=request.reason)
+            restored = next(item for item in await service.entries(updated) if item.entry_id == entry.entry_id)
+            return MemoryMutationResult(
+                previous_revision=current.revision,
+                memory_ref=updated.as_ref(),
+                entry=_entry_record(updated, restored),
             )
 
     async def changes(self, *, since_revision: int | None = None) -> MemoryChangesPage:
