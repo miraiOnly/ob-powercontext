@@ -43,10 +43,8 @@ from powercontext.builtin.runtime.prepared_text import (
 from powercontext.builtin.runtime.recall_sufficiency import RecallBudgetView
 from powercontext.builtin.runtime.evidence_selection import (
     PreparedContextFragment,
-    _evidence_terms,
-    evidence_windows,
-    fit_evidence_fragment,
     render_evidence_context,
+    select_evidence_fragments,
 )
 
 _MIN_TRUNCATED_CONTENT_BYTES = 64
@@ -275,55 +273,35 @@ class PreparedContextBuilder:
         request: PrepareContextRequest,
         memory_candidates: Sequence[PreparedMemoryCandidates],
     ) -> PreparedContextBuild:
-        terms = _evidence_terms(request.query)
-        windows: list[PreparedContextFragment] = []
-        seen: set[tuple[str, str, int, int]] = set()
+        candidates: list[tuple[str, MemoryEntryAddress]] = []
+        seen: set[tuple[str, str]] = set()
         for group in memory_candidates:
             if group.memory_ref is None:
                 continue
             artifact_address = ArtifactAddress(scope_id=group.scope_id, artifact=group.memory_ref)
             for hit in group.hits:
-                address = MemoryEntryAddress(
-                    memory=artifact_address,
-                    entry_id=hit.entry_id,
-                    entry_version_id=hit.entry_version_id,
-                )
-                for start, end in evidence_windows(hit.text, terms):
-                    key = (hit.entry_id, hit.entry_version_id, start, end)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    windows.append(
-                        PreparedContextFragment(
-                            address=address, start=start, end=end, text=hit.text[start:end]
-                        )
-                    )
-        if not windows:
-            for group in memory_candidates:
-                if group.memory_ref is None or not group.hits:
+                identity = (hit.entry_id, hit.entry_version_id)
+                if identity in seen:
                     continue
-                artifact_address = ArtifactAddress(scope_id=group.scope_id, artifact=group.memory_ref)
-                hit = group.hits[0]
+                seen.add(identity)
                 address = MemoryEntryAddress(
                     memory=artifact_address,
                     entry_id=hit.entry_id,
                     entry_version_id=hit.entry_version_id,
                 )
-                end = min(len(hit.text), 400)
-                windows.append(PreparedContextFragment(address=address, start=0, end=end, text=hit.text[:end]))
-                break
-        selected: list[PreparedContextFragment] = []
-        for fragment in windows[:16]:
-            fitted = fit_evidence_fragment(selected, fragment, request.max_bytes)
-            if fitted is not None:
-                selected.append(fitted)
-        if not selected:
+                candidates.append((hit.text, address))
+        fragments = select_evidence_fragments(
+            request.query,
+            tuple(candidates),
+            request.max_bytes,
+        )
+        if not fragments:
             return PreparedContextBuild(context=self.empty(), origins=(), fragments=())
-        content = render_evidence_context(tuple(selected))
+        content = render_evidence_context(tuple(fragments))
         return PreparedContextBuild(
             context=PreparedContext(status="ready", content=content, content_bytes=len(content.encode("utf-8"))),
-            origins=tuple(fragment.address for fragment in selected),
-            fragments=tuple(selected),
+            origins=tuple(fragment.address for fragment in fragments),
+            fragments=tuple(fragments),
         )
 
     def probe_budget(

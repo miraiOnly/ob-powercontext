@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
+import re
+from collections import Counter
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -28,6 +31,56 @@ from powercontext.sources.models import Source, SourceMaterialization
 PDF_PAGE_SOURCE_NAME = "pdf-page"
 PDF_PAGE_SOURCE_VERSION = "1"
 MAX_PDF_SOURCE_ID_LENGTH = 256
+_PDF_SEARCH_POOL_LIMIT = 400
+_PDF_TERM_POOL_LIMIT = 120
+_PDF_MAX_POOL = 900
+_PDF_TOKEN_PATTERN = re.compile(r"[a-z]+|\d+(?:\.\d+)?")
+_PDF_STOPWORDS = frozenset(
+    {
+        "a", "an", "the", "of", "in", "on", "at", "to", "for", "with", "by",
+        "is", "are", "was", "were", "be", "been", "being", "has", "have",
+        "had", "do", "does", "did", "and", "or", "not", "no", "but", "if",
+        "then", "than", "that", "this", "these", "those", "it", "its", "as",
+        "from", "into", "over", "under", "about", "which", "who", "whom",
+        "what", "when", "where", "how", "why", "their", "there", "they",
+        "them", "he", "she", "we", "you", "i", "his", "her", "our", "their",
+        "can", "could", "should", "would", "will", "may", "might", "must",
+        "shall", "also", "such", "per", "between", "among", "during",
+        "after", "before", "because", "while", "though", "so", "more",
+        "most", "some", "any", "each", "every", "both", "other", "only",
+        "very", "just", "using", "used", "use", "via", "whether", "either",
+        "total", "amount", "year", "years", "fiscal", "company", "report",
+        "following", "table", "million", "billion", "thousand", "net",
+        "give", "given", "provided", "primarily", "based", "please",
+        "assume", "answer", "question", "statement", "statements",
+    }
+)
+# Generic financial vocabulary bridging question phrasing to report language.
+_PDF_EXPANSIONS = {
+    "battles": ("litigation", "proceedings", "claims", "lawsuits", "disputes", "investigations"),
+    "geographies": ("segments", "divisions", "regions", "markets", "international"),
+    "capex": ("expenditures", "capital", "purchases"),
+    "ebitda": ("depreciation", "amortization", "profit"),
+    "operates": ("operations", "operating", "businesses"),
+    "litigation": ("proceedings", "claims", "disputes", "lawsuits"),
+    "revenue": ("sales",),
+    "workforce": ("employees", "headcount", "personnel"),
+    "employees": ("headcount", "workforce", "personnel"),
+    "profitability": ("margins", "margin", "profit"),
+    "unadjusted": ("operating",),
+    "capital": ("assets", "equipment", "expenditures", "property"),
+}
+# Standard financial abbreviations expanded before query analysis.
+_PDF_ABBREVIATIONS = (
+    (re.compile(r"\br\s*&\s*d\b"), "research development"),
+    (re.compile(r"\bd\s*&\s*a\b"), "depreciation amortization"),
+    (re.compile(r"\bsg\s*&\s*a\b"), "selling general administrative"),
+    (re.compile(r"\bm\s*&\s*a\b"), "mergers acquisitions divestitures"),
+    (re.compile(r"\bpp\s*&\s*e\b"), "property plant equipment"),
+    (re.compile(r"\bppne\b"), "property plant equipment net"),
+    (re.compile(r"\bcapex\b"), "capital expenditures"),
+    (re.compile(r"\bebitda\b"), "operating income depreciation amortization"),
+)
 
 
 class PDFDocumentInput(BaseModel):
@@ -189,39 +242,218 @@ PDF_PAGE_SOURCE_DEFINITION = AdapterSourceDefinition(
 )
 
 
+_STATEMENT_QUESTION_TERMS = frozenset(
+    {
+        "assets", "liabilities", "equity", "cash", "flows", "income", "revenue",
+        "sales", "operating", "depreciation", "amortization", "equipment",
+        "expenditures", "capital", "balance", "sheet", "property", "plant",
+        "stockholders", "earnings",
+    }
+)
+
+
 async def search_pdf_pages(
     memory,
     question: str,
     limit: int = 10,
 ) -> tuple:
-    """Search the scoped Memory and return distinct exact page citations."""
+    """Search the scoped Memory and return distinct exact page citations.
+
+    Candidate pools from several FTS queries (full question, individual
+    content terms and their generic finance synonyms, plus a
+    pseudo-relevance feedback expansion) are merged and re-ranked with an
+    IDF-weighted BM25 score and query-bigram bonuses, so evidence pages
+    whose phrasing differs from the question still rank well.
+    """
 
     from powercontext.builtin.artifacts.memory.models import MemoryCitation
     from powercontext.builtin.runtime import GetMemoryEntryRequest, SearchMemoryRequest
 
     if limit < 1:
-        limit = 10
-    request = SearchMemoryRequest(
-        query=question,
-        mode="fts",
-        limit=max(limit * 2, 20),
-    )
-    page = await memory.search(request)
+        return ()
+
+    normalized_question = question.casefold()
+    for pattern, replacement in _PDF_ABBREVIATIONS:
+        normalized_question = pattern.sub(replacement, normalized_question)
+
+    async def fetch(query: str, count: int):
+        page = await memory.search(SearchMemoryRequest(query=query, mode="fts", limit=count))
+        return page.hits
+
+    ordered_terms = []
+    weights: Counter = Counter()
+    for token in _PDF_TOKEN_PATTERN.findall(normalized_question):
+        if token in _PDF_STOPWORDS or (len(token) == 1 and not token.isdigit()):
+            continue
+        ordered_terms.append(token)
+        weights[token] += 1
+    question_bigrams = set(zip(ordered_terms, ordered_terms[1:]))
+
+    pool: dict[tuple[str, str], object] = {}
+    pool_order: list[object] = []
+
+    def add(hits) -> None:
+        for hit in hits:
+            key = (hit.entry_id, hit.entry_version_id)
+            if key not in pool and len(pool) < _PDF_MAX_POOL:
+                pool[key] = hit
+                pool_order.append(hit)
+
+    add(await fetch(question, _PDF_SEARCH_POOL_LIMIT))
+    full_order = list(pool_order)
+
+    expansion_terms: list[str] = []
+    for term in ordered_terms[:14]:
+        for expansion in _PDF_EXPANSIONS.get(term, ()):
+            if expansion not in expansion_terms and expansion not in weights:
+                expansion_terms.append(expansion)
+    term_ranks: list[tuple[str, float, dict]] = []
+    for term in ordered_terms[:14]:
+        result = await fetch(term, _PDF_TERM_POOL_LIMIT)
+        add(result)
+        term_ranks.append(
+            (
+                term,
+                1.0,
+                {
+                    (hit.entry_id, hit.entry_version_id): rank
+                    for rank, hit in enumerate(result, 1)
+                    if rank <= 40
+                },
+            )
+        )
+    for expansion in expansion_terms:
+        result = await fetch(expansion, _PDF_TERM_POOL_LIMIT)
+        add(result)
+        term_ranks.append(
+            (
+                expansion,
+                0.7,
+                {
+                    (hit.entry_id, hit.entry_version_id): rank
+                    for rank, hit in enumerate(result, 1)
+                    if rank <= 40
+                },
+            )
+        )
+    if set(weights) & _STATEMENT_QUESTION_TERMS:
+        result = await fetch("consolidated", _PDF_TERM_POOL_LIMIT)
+        add(result)
+        term_ranks.append(
+            (
+                "consolidated",
+                0.8,
+                {
+                    (hit.entry_id, hit.entry_version_id): rank
+                    for rank, hit in enumerate(result, 1)
+                    if rank <= 40
+                },
+            )
+        )
+
+    # Pseudo-relevance feedback: terms shared by several top-ranked pages.
+    feedback_counts: Counter = Counter()
+    feedback_bodies = []
+    for hit in full_order[:8]:
+        text = hit.text
+        body = text.split("\n", 1)[1] if "\n" in text else text
+        tokens = set(_PDF_TOKEN_PATTERN.findall(body.casefold()))
+        feedback_bodies.append(tokens)
+        feedback_counts.update(tokens)
+    feedback_terms = [
+        token
+        for token, frequency in feedback_counts.items()
+        if frequency >= 2
+        and len(token) >= 2
+        and token not in _PDF_STOPWORDS
+        and token not in weights
+        and not (token.isdigit() and token not in weights)
+    ][:10]
+    if feedback_terms:
+        add(
+            await fetch(
+                " ".join(ordered_terms + expansion_terms + feedback_terms),
+                _PDF_SEARCH_POOL_LIMIT,
+            )
+        )
+
+    hits = pool_order
+    if not hits:
+        return ()
+    bodies: list[str] = []
+    for hit in hits:
+        text = hit.text
+        bodies.append(text.split("\n", 1)[1] if "\n" in text else text)
+    tokenized = [Counter(_PDF_TOKEN_PATTERN.findall(body.casefold())) for body in bodies]
+    lengths = [max(1, sum(counts.values())) for counts in tokenized]
+    average_length = sum(lengths) / len(lengths)
+    document_frequency: Counter = Counter()
+    for counts in tokenized:
+        document_frequency.update(counts.keys())
+    pool_size = len(hits)
+    idf = {
+        token: math.log((pool_size + 1) / (document_frequency[token] + 1)) + 1.0
+        for token in document_frequency
+    }
+
+    scored_weights = Counter(weights)
+    for term in expansion_terms:
+        scored_weights[term] += 0.7
+    for term in feedback_terms:
+        scored_weights[term] += 0.5
+
+    scored: list[tuple[float, int]] = []
+    for index, hit in enumerate(hits):
+        counts = tokenized[index]
+        score = 0.0
+        for token, frequency in counts.items():
+            weight = scored_weights.get(token)
+            if not weight:
+                continue
+            score += (
+                weight
+                * idf.get(token, 1.0)
+                * (frequency * 2.2)
+                / (frequency + 1.2 * (0.25 + 0.75 * lengths[index] / average_length))
+            )
+        body_terms = _PDF_TOKEN_PATTERN.findall(bodies[index].casefold())
+        body_bigrams = set(zip(body_terms, body_terms[1:]))
+        for pair in body_bigrams & question_bigrams:
+            score += 2.0 * (idf.get(pair[0], 1.0) + idf.get(pair[1], 1.0))
+        title_terms = set(body_terms[:12])
+        for token in title_terms & set(scored_weights):
+            score += 2.0 * idf.get(token, 1.0)
+        if "consolidated" in body_terms[:40] and (set(scored_weights) & _STATEMENT_QUESTION_TERMS):
+            score += 3.0
+        key = (hit.entry_id, hit.entry_version_id)
+        for term, term_weight, ranks in term_ranks:
+            rank = ranks.get(key)
+            if rank is not None:
+                pair_idf = sum(idf.get(part, 1.0) for part in term.split())
+                score += term_weight * 0.8 * pair_idf / (2 + rank)
+        scored.append((score, index))
+    scored.sort(key=lambda pair: -pair[0])
+
     seen_sources: set[str] = set()
     citations: list[MemoryCitation] = []
-    for hit in page.hits:
+    for _, index in scored:
+        hit = hits[index]
         citation = MemoryCitation(
             memory_ref=hit.memory_ref,
             entry_id=hit.entry_id,
             entry_version_id=hit.entry_version_id,
         )
-        entry = (await memory.get(GetMemoryEntryRequest(citation=citation))).entry
+        try:
+            entry = (await memory.get(GetMemoryEntryRequest(citation=citation))).entry
+        except Exception:  # noqa: BLE001 - skip candidates that cannot be resolved
+            continue
         sources = entry.sources or ()
         if not sources:
             continue
-        if sources[0].source_id in seen_sources:
+        source_id = sources[0].source_id
+        if source_id in seen_sources:
             continue
-        seen_sources.add(sources[0].source_id)
+        seen_sources.add(source_id)
         citations.append(citation)
         if len(citations) >= limit:
             break
