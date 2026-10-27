@@ -140,6 +140,12 @@ def parse_pdf_document(value: PDFDocumentInput) -> tuple[PDFPageInput, ...]:
 
     digest = hashlib.sha256(value.content).hexdigest()
 
+    def bounded(text: str) -> str:
+        data = text.encode("utf-8")
+        if len(data) <= 8192:
+            return text
+        return data[:8192].decode("utf-8", errors="ignore")
+
     try:
         reader = PdfReader(io.BytesIO(value.content))
         if reader.is_encrypted:
@@ -154,7 +160,7 @@ def parse_pdf_document(value: PDFDocumentInput) -> tuple[PDFPageInput, ...]:
                 extracted = page.extract_text()
             except Exception as error:  # noqa: BLE001
                 raise ValueError("pdf document cannot be fully parsed") from error  # noqa: TRY003
-            texts.append(extracted if isinstance(extracted, str) else "")
+            texts.append(bounded(extracted) if isinstance(extracted, str) else "")
     except ValueError:
         raise
     except Exception as error:  # noqa: BLE001
