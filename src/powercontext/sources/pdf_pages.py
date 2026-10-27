@@ -119,6 +119,15 @@ def pdf_page_source_id(document_id: str, document_sha256: str, page_number: int)
         f"{document_sha256}:{page_number}"
     )
     if len(identity) > MAX_PDF_SOURCE_ID_LENGTH:
+        # Keep the identity stable and bounded for unusually long caller ids.
+        document_fingerprint = hashlib.sha256(document_id.encode("utf-8")).hexdigest()[:24]
+        identity = (
+            f"{PDF_PAGE_SOURCE_NAME}:"
+            f"{quote(document_id, safe='')[:180]}:"
+            f"{document_fingerprint}:"
+            f"{document_sha256}:{page_number}"
+        )
+    if len(identity) > MAX_PDF_SOURCE_ID_LENGTH:  # pragma: no cover - defensive
         raise ValueError(
             f"pdf page source_id must not exceed {MAX_PDF_SOURCE_ID_LENGTH} characters",
         )  # noqa: TRY003
