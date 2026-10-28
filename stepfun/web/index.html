@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Edge KB — 端侧 AI + seekdb 混合检索</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, "Segoe UI", "PingFang SC", sans-serif; margin: 0; background: #f5f6f8; color: #1c1e21; }
+    header { background: #101820; color: #fff; padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+    .badge { background: #2a3b4d; border-radius: 999px; padding: 3px 10px; font-size: 12px; }
+    main { max-width: 1080px; margin: 18px auto; padding: 0 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    section { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px; padding: 16px; }
+    h2 { font-size: 14px; margin: 0 0 10px; color: #444; }
+    textarea { width: 100%; min-height: 140px; box-sizing: border-box; border: 1px solid #ccd2d9; border-radius: 8px; padding: 8px; font: 13px/1.5 monospace; }
+    button { background: #0b6bcb; color: #fff; border: 0; border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; }
+    button:disabled { background: #9db4c8; cursor: default; }
+    button.secondary { background: #e8edf2; color: #24303a; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    .muted { color: #68727c; font-size: 12px; }
+    #status { margin-top: 8px; font-size: 13px; white-space: pre-wrap; }
+    .result { border: 1px solid #e3e6ea; border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
+    .result .score { color: #0b6bcb; font-size: 12px; }
+    .result .meta { color: #68727c; font-size: 12px; }
+    label { font-size: 12px; color: #444; }
+    input[type=range] { width: 200px; }
+    progress { width: 100%; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Edge KB</h1>
+  <span class="badge" id="backend-badge">推理后端: 检测中…</span>
+  <span class="badge" id="precision-badge">精度: —</span>
+  <span class="badge" id="db-badge">seekdb: 连接中…</span>
+</header>
+<main>
+  <section>
+    <h2>1. 模型与后端</h2>
+    <div class="row">
+      <label>精度
+        <select id="precision">
+          <option value="int8">INT8（量化，默认）</option>
+          <option value="fp32">FP32（基线对比）</option>
+        </select>
+      </label>
+      <label>批大小 <input id="batch-size" type="number" min="1" max="256" value="32" style="width:70px"/></label>
+      <button id="load-model">加载模型</button>
+    </div>
+    <div class="muted">优先 WebGPU；不可用时自动降级 WASM。模型文件由本仓库本地加载，推理全部在浏览器内完成。</div>
+    <div id="status"></div>
+    <progress id="model-progress" max="100" value="0" style="display:none"></progress>
+  </section>
+
+  <section>
+    <h2>2. 语料导入（本地向量化 → seekdb）</h2>
+    <div class="muted">每行或每空行分段视为一篇文档；向量在浏览器本地计算，随后写入 seekdb 并刷新索引。</div>
+    <textarea id="docs" placeholder="粘贴文本语料，每段一篇文档。&#10;例如：&#10;OceanBase 数据库大赛考察端侧 AI 与混合检索。&#10;seekdb 支持向量与全文混合检索。"></textarea>
+    <div class="row">
+      <button id="ingest">导入语料</button>
+      <button class="secondary" id="reset-db">重置知识库</button>
+      <span class="muted" id="doc-count"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>3. 混合检索（seekdb 内完成）</h2>
+    <div class="row">
+      <input id="query" type="text" placeholder="输入查询" style="flex:1; padding:8px; border:1px solid #ccd2d9; border-radius:8px;"/>
+      <button id="search">检索</button>
+      <label>K <input id="k" type="number" min="1" max="100" value="5" style="width:60px"/></label>
+    </div>
+    <div class="muted" id="search-time"></div>
+    <div id="results"></div>
+  </section>
+
+  <section>
+    <h2>4. 性能测量（浏览器内实测）</h2>
+    <div class="muted">测量模型加载、向量化吞吐、端到端查询延迟；结果同时写入服务端 bench-results.json。</div>
+    <button id="bench">运行浏览器基准</button>
+    <div class="muted" id="bench-out"></div>
+  </section>
+</main>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
