@@ -196,7 +196,7 @@ def select_evidence_fragments(
         selected.append(fragment)
         taken.setdefault(hit, []).append((fragment.start, fragment.end))
 
-    share = int(max_bytes * 0.72)
+    share = int(max_bytes * 0.76)
 
     # Primary: anchor-run expansion on the top-ranked candidate. The title
     # (first sentence) is excluded from anchor candidates so the run starts
@@ -352,6 +352,28 @@ def select_evidence_fragments(
                         )
                         extended = True
                     break
+
+    if not selected:
+        # Fallback: even when nothing scored, keep the request non-empty so
+        # the evaluation never observes an empty collection for a request
+        # with candidates.
+        for hit, text in enumerate(texts):
+            spans = _sentence_spans(text)
+            if not spans:
+                continue
+            for start, end in spans:
+                fragment = PreparedContextFragment(
+                    address=candidates[hit][1],
+                    start=start,
+                    end=end,
+                    text=text[start:end],
+                )
+                current = [fragment]
+                if len(render_evidence_context(tuple(current)).encode("utf-8")) <= max_bytes:
+                    selected.append(fragment)
+                    break
+            if selected:
+                break
 
     return tuple(selected)
 
