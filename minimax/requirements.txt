@@ -1,0 +1,4 @@
+pymysql>=1.1,<2
+pytest>=8.0
+requests>=2.31
+powercontext @ git+https://github.com/oceanbase/powercontext@9db1753434162c0aa7c9f1189a1722e617880a52

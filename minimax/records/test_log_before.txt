@@ -1,0 +1,55 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0 -- /home/yy/pc-2026/competition/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/yy/pc-2026/minimax/project_before
+plugins: anyio-4.15.1, asyncio-1.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 9 items
+
+tests/test_feature.py::test_search_is_case_insensitive FAILED            [ 11%]
+tests/test_feature.py::test_search_mixed_case_keyword FAILED             [ 22%]
+tests/test_feature.py::test_search_empty_keyword_returns_empty PASSED    [ 33%]
+tests/test_feature.py::test_search_does_not_mutate PASSED                [ 44%]
+tests/test_regression.py::test_filter_by_status_basic PASSED             [ 55%]
+tests/test_regression.py::test_filter_by_status_unknown_returns_empty PASSED [ 66%]
+tests/test_regression.py::test_add_trims_title PASSED                    [ 77%]
+tests/test_regression.py::test_list_issues_preserves_order PASSED        [ 88%]
+tests/test_regression.py::test_public_signatures_exist PASSED            [100%]
+
+=================================== FAILURES ===================================
+_______________________ test_search_is_case_insensitive ________________________
+
+    def test_search_is_case_insensitive():
+        tracker = build_tracker()
+        hits = tracker.search("Database")
+>       assert [issue.title for issue in hits] == [
+            "Fix database connection pool",
+            "Database backup strategy",
+        ]
+E       AssertionError: assert ['Database backup strategy'] == ['Fix databas...kup strategy']
+E         
+E         At index 0 diff: 'Database backup strategy' != 'Fix database connection pool'
+E         Right contains one more item: 'Database backup strategy'
+E         
+E         Full diff:
+E           [
+E         -     'Fix database connection pool',
+E               'Database backup strategy',
+E           ]
+
+tests/test_feature.py:23: AssertionError
+________________________ test_search_mixed_case_keyword ________________________
+
+    def test_search_mixed_case_keyword():
+        tracker = build_tracker()
+        hits = tracker.search("dAtAbAsE")
+>       assert len(hits) == 2
+E       assert 0 == 2
+E        +  where 0 = len([])
+
+tests/test_feature.py:32: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_feature.py::test_search_is_case_insensitive - AssertionErro...
+FAILED tests/test_feature.py::test_search_mixed_case_keyword - assert 0 == 2
+========================= 2 failed, 7 passed in 0.03s ==========================
+exit=1 (expected non-zero)

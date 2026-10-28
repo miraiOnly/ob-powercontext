@@ -1,0 +1,21 @@
+--- /home/yy/pc-2026/minimax/project_before/tracker.py	2026-10-28 23:54:54.502051657 +0800
++++ /home/yy/pc-2026/minimax/project/tracker.py	2026-10-28 23:54:54.490051750 +0800
+@@ -1,7 +1,6 @@
+-"""IssueTracker: 任务看板的最小业务工程（修改前快照）。
++"""IssueTracker: 任务看板的最小业务工程（SDD 验证样例的目标工程）。
+ 
+-本快照中 S4（大小写不敏感搜索）尚未实现：
+-`search` 为大小写敏感的朴素子串匹配，目标功能测试将因此失败。
++本次开发任务：实现 S4 的大小写不敏感关键词搜索。
+ """
+ 
+ from __future__ import annotations
+@@ -35,5 +34,6 @@
+     def search(self, keyword: str | None) -> list[Issue]:
+         if not keyword:
+             return []
+-        # 修改前：大小写敏感（S4 未实现）
+-        return [issue for issue in self._issues if keyword in issue.title]
++        # S4：大小写不敏感匹配
++        needle = keyword.casefold()
++        return [issue for issue in self._issues if needle in issue.title.casefold()]
