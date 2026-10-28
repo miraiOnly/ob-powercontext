@@ -59,16 +59,52 @@ _PDF_STOPWORDS = frozenset(
 _PDF_EXPANSIONS = {
     "battles": ("litigation", "proceedings", "claims", "lawsuits", "disputes", "investigations"),
     "geographies": ("segments", "divisions", "regions", "markets", "international"),
+    "geography": ("geographies", "geographic", "segments", "regions", "markets"),
     "capex": ("expenditures", "capital", "purchases"),
     "ebitda": ("depreciation", "amortization", "profit"),
     "operates": ("operations", "operating", "businesses"),
+    "operate": ("operations", "operating", "operated", "businesses"),
     "litigation": ("proceedings", "claims", "disputes", "lawsuits"),
-    "revenue": ("sales",),
+    "revenue": ("sales", "revenues"),
+    "revenues": ("sales", "revenue"),
     "workforce": ("employees", "headcount", "personnel"),
-    "employees": ("headcount", "workforce", "personnel"),
+    "employees": ("headcount", "workforce", "personnel", "employee"),
+    "employee": ("employees", "headcount", "workforce", "personnel"),
     "profitability": ("margins", "margin", "profit"),
     "unadjusted": ("operating",),
     "capital": ("assets", "equipment", "expenditures", "property"),
+    "retain": ("retention", "retained", "retaining", "retains"),
+    "retention": ("retain", "retained", "retaining", "retains"),
+    "retained": ("retention", "retain", "retaining"),
+    "drove": ("driven", "driving", "drive", "increase", "decrease"),
+    "driven": ("drove", "driving", "drive", "increase", "decrease"),
+    "margin": ("margins",),
+    "margins": ("margin",),
+    "tax": ("taxes", "taxation"),
+    "taxes": ("tax", "taxation"),
+    "liability": ("liabilities", "debt", "obligations"),
+    "liabilities": ("liability", "debt", "obligations"),
+    "growth": ("grew", "grow", "growing"),
+    "grew": ("growth", "grow", "growing"),
+    "inventory": ("inventories", "turnover"),
+    "inventories": ("inventory", "turnover"),
+    "turnover": ("inventory", "inventories", "turns"),
+    "member": ("members", "membership", "cardmember", "cardmembers"),
+    "members": ("member", "membership", "cardmember", "cardmembers"),
+    "costs": ("expenses", "cost"),
+    "expenses": ("costs", "cost", "expense"),
+    "sales": ("revenue", "revenues"),
+    "income": ("earnings",),
+    "earnings": ("income",),
+    "acquire": ("acquisitions", "acquired", "acquires"),
+    "acquisitions": ("acquire", "acquired"),
+    "effective": ("rate",),
+    "cash": ("flows", "flow"),
+    "flows": ("cash", "flow"),
+    "amd": ("advanced micro devices",),
+    "jnj": ("johnson johnson",),
+    "amex": ("american express",),
+    "axp": ("american express",),
 }
 # Standard financial abbreviations expanded before query analysis.
 _PDF_ABBREVIATIONS = (
@@ -257,6 +293,67 @@ PDF_PAGE_SOURCE_DEFINITION = AdapterSourceDefinition(
 )
 
 
+_BALANCE_SHEET_TERMS = frozenset(
+    {
+        "assets", "liabilities", "liability", "equity", "stockholders", "balance",
+        "inventory", "inventories", "receivables", "payables", "goodwill", "intangibles",
+    }
+)
+_INCOME_STATEMENT_TERMS = frozenset(
+    {"revenue", "revenues", "sales", "income", "earnings", "margin", "margins", "tax", "taxes", "expenses", "costs"}
+)
+_CASH_FLOW_TERMS = frozenset({"cash", "flows", "flow", "financing", "investing", "operating"})
+
+_SECTION_BALANCE = "balance"
+_SECTION_INCOME = "income"
+_SECTION_CASH = "cash"
+_SECTION_MDA = "mda"
+
+
+def _page_sections(body: str) -> set[str]:
+    lowered = body.casefold()
+    sections = set()
+    if (
+        ("total assets" in lowered and "total liabilities" in lowered)
+        or ("assets" in lowered and "liabilities" in lowered and ("equity" in lowered or "stockholders" in lowered or "shareholders" in lowered))
+    ):
+        sections.add(_SECTION_BALANCE)
+    if ("net income" in lowered or "net earnings" in lowered or "net loss" in lowered) and (
+        "revenue" in lowered or "net sales" in lowered or "sales" in lowered
+    ):
+        sections.add(_SECTION_INCOME)
+    if "operating activities" in lowered and ("investing activities" in lowered or "financing activities" in lowered):
+        sections.add(_SECTION_CASH)
+    if (
+        "management's discussion" in lowered
+        or "management discussion" in lowered
+        or "results of operations" in lowered
+        or "financial condition and results" in lowered
+    ):
+        sections.add(_SECTION_MDA)
+    return sections
+
+
+def _question_sections(question: str) -> set[str]:
+    lowered = question.casefold()
+    sections = set()
+    if _BALANCE_SHEET_TERMS & set(lowered.split()) or (
+        "balance sheet" in lowered or "largest liability" in lowered or "total assets" in lowered
+        or "total liabilities" in lowered or "stockholders' equity" in lowered
+    ):
+        sections.add(_SECTION_BALANCE)
+    if _INCOME_STATEMENT_TERMS & set(lowered.split()) or (
+        "income statement" in lowered or "gross margin" in lowered or "operating margin" in lowered
+        or "net income" in lowered or "tax rate" in lowered or "revenue" in lowered
+    ):
+        sections.add(_SECTION_INCOME)
+    if _CASH_FLOW_TERMS & set(lowered.split()) or "cash flow" in lowered:
+        sections.add(_SECTION_CASH)
+    if "drove" in lowered or "driven" in lowered or "primarily" in lowered or "what drove" in lowered:
+        sections.add(_SECTION_MDA)
+    return sections
+
+
 _STATEMENT_QUESTION_TERMS = frozenset(
     {
         "assets", "liabilities", "equity", "cash", "flows", "income", "revenue",
@@ -417,6 +514,12 @@ async def search_pdf_pages(
     for term in feedback_terms:
         scored_weights[term] += 0.5
 
+    question_sections = _question_sections(question)
+    doc_ids: list[str] = []
+    for hit in hits:
+        text = hit.text
+        doc_ids.append(text.split("\n", 1)[0] if "\n" in text else "")
+
     scored: list[tuple[float, int]] = []
     for index, hit in enumerate(hits):
         counts = tokenized[index]
@@ -440,6 +543,14 @@ async def search_pdf_pages(
             score += 2.0 * idf.get(token, 1.0)
         if "consolidated" in body_terms[:40] and (set(scored_weights) & _STATEMENT_QUESTION_TERMS):
             score += 3.0
+        page_sections = _page_sections(bodies[index])
+        matched_sections = page_sections & question_sections
+        if matched_sections:
+            score += 8.0 * len(matched_sections)
+        elif _SECTION_MDA in question_sections and (
+            "results of operations" in bodies[index].casefold() or "consolidated results" in bodies[index].casefold()
+        ):
+            score += 3.0
         key = (hit.entry_id, hit.entry_version_id)
         for term, term_weight, ranks in term_ranks:
             rank = ranks.get(key)
@@ -447,6 +558,15 @@ async def search_pdf_pages(
                 pair_idf = sum(idf.get(part, 1.0) for part in term.split())
                 score += term_weight * 0.8 * pair_idf / (2 + rank)
         scored.append((score, index))
+    doc_totals: dict[str, float] = {}
+    for raw_score, index in scored:
+        doc_totals[doc_ids[index]] = doc_totals.get(doc_ids[index], 0.0) + raw_score
+    if len(doc_totals) > 1:
+        max_doc_score = max(doc_totals.values()) or 1.0
+        scored = [
+            (raw_score * (0.15 + 0.85 * doc_totals[doc_ids[index]] / max_doc_score), index)
+            for raw_score, index in scored
+        ]
     scored.sort(key=lambda pair: -pair[0])
 
     seen_sources: set[str] = set()
