@@ -198,11 +198,16 @@ def select_evidence_fragments(
 
     share = int(max_bytes * 0.72)
 
-    # Primary: anchor-run expansion on the top-ranked candidate.
+    # Primary: anchor-run expansion on the top-ranked candidate. The title
+    # (first sentence) is excluded from anchor candidates so the run starts
+    # inside the abstract body instead of the front matter.
     if texts and texts[0]:
         spans = _sentence_spans(texts[0])
         anchors = sorted(
-            (_Candidate(0, start, end, score_span(0, start, end)) for start, end in spans),
+            (
+                _Candidate(0, start, end, score_span(0, start, end))
+                for start, end in spans[1:]
+            ),
             key=lambda item: -item.score,
         )
         for anchor in anchors:
@@ -270,7 +275,7 @@ def select_evidence_fragments(
             for candidate in per_hit[hit]:
                 if overlaps(hit, candidate.start, candidate.end):
                     continue
-                fragment = fits(candidate, share, char_limit=600)
+                fragment = fits(candidate, max_bytes, char_limit=600)
                 if fragment is None:
                     continue
                 accept(fragment, hit)
