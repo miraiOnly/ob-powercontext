@@ -1,0 +1,19 @@
+[health] {"ok": true, "storage": "sqlite", "engine": "powercontext"}
+[conversation-1] remember {"ok": true} <- 铁蛋你好，我叫小明！
+[conversation-1] remember {"ok": true} <- 我把你家门口的灯笼换成南瓜了，哈哈！
+[conversation-1] remember {"ok": true} <- 还有，我往你的茶壶里倒了半瓶醋。
+[conversation-2] remember {"ok": true} <- 铁蛋，你还记得我是谁吗？我干过什么坏事？
+[conversation-2] recall -> {
+  "player": "小明",
+  "memories": [
+    {
+      "text": "还有，我往你的茶壶里倒了半瓶醋。",
+      "score": 0.0164
+    },
+    {
+      "text": "我把你家门口的灯笼换成南瓜了，哈哈！",
+      "score": 0.0161
+    }
+  ]
+}
+PASS: the NPC remembers the player's pranks in a new conversation.
