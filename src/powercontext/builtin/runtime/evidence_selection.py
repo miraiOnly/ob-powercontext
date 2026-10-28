@@ -200,16 +200,29 @@ def select_evidence_fragments(
 
     # Primary: anchor-run expansion on the top-ranked candidate. The title
     # (first sentence) is excluded from anchor candidates so the run starts
-    # inside the abstract body instead of the front matter.
+    # inside the abstract body instead of the front matter. The anchor is the
+    # sentence whose neighbourhood (itself plus adjacent sentences) has the
+    # highest total claim-term evidence, so the run starts inside a dense
+    # evidence region instead of an isolated high-scoring sentence.
     if texts and texts[0]:
         spans = _sentence_spans(texts[0])
-        anchors = sorted(
-            (
-                _Candidate(0, start, end, score_span(0, start, end))
-                for start, end in spans[1:]
-            ),
-            key=lambda item: -item.score,
-        )
+        body_spans = spans[1:]
+        span_scores = [score_span(0, start, end) for start, end in body_spans]
+
+        def neighbourhood(center: int) -> float:
+            total = span_scores[center]
+            if center > 0:
+                total += span_scores[center - 1]
+            if center + 1 < len(span_scores):
+                total += span_scores[center + 1]
+            return total
+
+        ranked = []
+        for index, (start, end) in enumerate(body_spans):
+            blended = neighbourhood(index) + 0.5 * span_scores[index]
+            ranked.append((blended, span_scores[index], start, end))
+        ranked.sort(key=lambda item: (-item[0], -item[1]))
+        anchors = [_Candidate(0, start, end, score) for _, score, start, end in ranked]
         for anchor in anchors:
             if overlaps(0, anchor.start, anchor.end):
                 continue
